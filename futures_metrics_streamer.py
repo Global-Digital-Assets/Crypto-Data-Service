@@ -12,6 +12,7 @@ from typing import List, Optional
 
 import aiosqlite
 from binance import AsyncClient
+from binance.exceptions import BinanceAPIException
 
 DB_PATH = os.getenv("FUTURES_DB", "/root/data-service/futures_metrics.db")
 BUCKET_CSV = os.getenv("BUCKET_MAP", "/root/analytics-tool-v2/bucket_mapping.csv")
@@ -19,6 +20,7 @@ INTERVAL_SECONDS = int(os.getenv("FUT_METRICS_SECS", "300"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("futures-metrics")
+FUTURES_MAP = {}  # cache spot->futures symbol (e.g., PEPEUSDT -> 1000PEPEUSDT)
 
 
 def load_symbols() -> List[str]:
@@ -48,22 +50,51 @@ async def upsert(table: str, symbol: str, ts: int, value: float):
 
 
 async def fetch_for_symbol(client: AsyncClient, symbol: str):
-    # futures pair is usually same symbol; Binance uses USDT perpetual
-    try:
-        oi_data = await client.futures_open_interest(symbol=symbol)
-        oi_val = float(oi_data["openInterest"])
-        ts_ms = int(time.time() * 1000)
-        await upsert("open_interest", symbol, ts_ms, oi_val)
-    except Exception as e:
-        log.debug("No OI for %s: %s", symbol, e)
+    fut_sym = FUTURES_MAP.get(symbol, symbol)
 
+    async def _try(symbol_to_query: str):
+        oi_val = None
+        rate_val = None
+        ts_ms = int(time.time() * 1000)
+        try:
+            oi_data = await client.futures_open_interest(symbol=symbol_to_query)
+            oi_val = float(oi_data["openInterest"])
+            await upsert("open_interest", symbol, ts_ms, oi_val)
+        except BinanceAPIException as be:
+            if be.code == -1121:  # invalid symbol
+                raise
+            log.debug("OI error %s: %s", symbol_to_query, be)
+        except Exception as e:
+            log.debug("OI error %s: %s", symbol_to_query, e)
+
+        try:
+            fr = await client.futures_premium_index(symbol=symbol_to_query)
+            ts_ms = int(fr["time"])
+            rate_val = float(fr["lastFundingRate"])
+            await upsert("funding_rate", symbol, ts_ms, rate_val)
+        except BinanceAPIException as be:
+            if be.code == -1121:
+                raise
+            log.debug("Funding error %s: %s", symbol_to_query, be)
+        except Exception as e:
+            log.debug("Funding error %s: %s", symbol_to_query, e)
+
+        return (oi_val is not None) or (rate_val is not None)
+
+    success = True
     try:
-        fr = await client.futures_premium_index(symbol=symbol)
-        ts_ms = int(fr["time"])
-        rate = float(fr["lastFundingRate"])
-        await upsert("funding_rate", symbol, ts_ms, rate)
-    except Exception as e:
-        log.debug("No funding for %s: %s", symbol, e)
+        success = await _try(fut_sym)
+    except BinanceAPIException:
+        success = False
+
+    if not success:
+        alt = f"1000{symbol}"
+        try:
+            if await _try(alt):
+                FUTURES_MAP[symbol] = alt
+                log.info("Mapped %s -> %s futures symbol", symbol, alt)
+        except BinanceAPIException:
+            log.debug("No futures contract for %s (tried %s)", symbol, alt)
 
 
 async def main():

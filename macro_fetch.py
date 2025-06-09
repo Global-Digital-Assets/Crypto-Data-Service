@@ -8,6 +8,7 @@ from typing import Dict
 
 import aiosqlite
 import pandas as pd
+import yfinance as yf
 
 DB_PATH = os.getenv("MACRO_DB", "/root/data-service/macro.db")
 
@@ -15,8 +16,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("macro-fetch")
 
 URLS: Dict[str, str] = {
-    "DXY": "https://stooq.com/q/d/l/?s=%5EDXY&i=d",
-    "VIX": "https://stooq.com/q/d/l/?s=%5EVIX&i=d",
+    "DXY": "https://query1.finance.yahoo.com/v7/finance/download/DXY?period1=1104537600&period2=4102444800&interval=1d&events=history&includeAdjustedClose=true",
+    "VIX": "https://query1.finance.yahoo.com/v7/finance/download/%5EVIX?period1=1104537600&period2=4102444800&interval=1d&events=history&includeAdjustedClose=true",
 }
 
 
@@ -40,14 +41,26 @@ async def upsert(symbol: str, ts: int, value: float):
 async def fetch_symbol(symbol: str, url: str):
     try:
         df = pd.read_csv(url)
+        if df.empty:
+            raise ValueError("empty csv")
         today_row = df.iloc[-1]
-        date_str = today_row["Date"]
+        date_str = str(today_row["Date"])
         price = float(today_row["Close"])
-        ts = int(time.mktime(dt.datetime.strptime(date_str, "%Y-%m-%d").timetuple()) * 1000)
-        await upsert(symbol, ts, price)
-        log.info("%s %s %.2f", symbol, date_str, price)
-    except Exception as e:
-        log.error("macro fetch %s failed: %s", symbol, e)
+    except Exception as csv_err:
+        log.warning("CSV fetch failed for %s: %s. Falling back to yfinance.", symbol, csv_err)
+        # Map to Yahoo ticker (prefix ^ for index)
+        yf_sym = {"DXY": "DX-Y.NYB", "VIX": "^VIX"}.get(symbol, symbol)
+        try:
+            hist = yf.Ticker(yf_sym).history(period="1d")
+            today_row = hist.iloc[-1]
+            date_str = today_row.name.strftime("%Y-%m-%d")
+            price = float(today_row["Close"])
+        except Exception as yf_err:
+            log.error("yfinance fetch failed for %s: %s", symbol, yf_err)
+            return
+    ts = int(time.mktime(dt.datetime.strptime(date_str, "%Y-%m-%d").timetuple()) * 1000)
+    await upsert(symbol, ts, price)
+    log.info("%s %s %.2f", symbol, date_str, price)
 
 
 async def main():
