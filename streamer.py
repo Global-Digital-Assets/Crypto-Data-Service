@@ -20,6 +20,7 @@ except Exception as exc:
 class Streamer:
     def __init__(self):
         self.db = DB_PATH
+        self.invalid = set()
         self._init_db()
         self.client = None
 
@@ -35,7 +36,18 @@ class Streamer:
             k = (await self.client.get_klines(symbol=sym, interval='1m', limit=1))[0]
             return {"timestamp": int(k[0]), "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])}
         except Exception as e:
-            log.error("%s error %s", sym, e); return None
+            # Fallback: try underlying spot symbol if prefixed with 1000
+            if "Invalid symbol" in str(e) and sym.startswith("1000"):
+                base_sym = sym[4:]
+                try:
+                    k = (await self.client.get_klines(symbol=base_sym, interval='1m', limit=1))[0]
+                    log.warning("%s missing on spot; using %s candles", sym, base_sym)
+                    return {"timestamp": int(k[0]), "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])}
+                except Exception:
+                    pass
+            log.error("%s error %s", sym, e)
+            self.invalid.add(sym)
+            return None
 
     def _upsert(self, table: str, sym: str, c: Dict):
         conn = sqlite3.connect(self.db)
@@ -46,7 +58,9 @@ class Streamer:
         self.client = await AsyncClient.create()
         try:
             while True:
-                for s in TOKENS:
+                for s in list(TOKENS):
+                    if s in self.invalid:
+                        continue
                     c = await self._fetch(s)
                     if c:
                         self._upsert('candles',s,c)
