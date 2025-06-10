@@ -53,16 +53,9 @@ def _query_external(db_path: str, sql: str, params: tuple = ()) -> List[tuple]:
 @app.get("/candles/{symbol}/{tf}")
 def get_candles(symbol: str, tf: str = "15m", limit: int = 200) -> Dict:
     symbol = symbol.upper()
-
-    tf = tf.lower()
-    if tf in ('1m','60s','1'): table='candles'
-    elif tf in ('15m','900s','15'): table='candles_900s'
-    else:
-        raise HTTPException(status_code=400, detail='unsupported tf')
     rows = _query_db(
-        f"SELECT timestamp, open, high, low, close, volume FROM {table} WHERE symbol=? ORDER BY timestamp DESC LIMIT ?",
-    )
-
+        "SELECT timestamp, open, high, low, close, volume FROM candles WHERE symbol=? ORDER BY timestamp DESC LIMIT ?",
+        (symbol, limit),
     )
     candles = [dict(zip(["ts", "open", "high", "low", "close", "vol"], r)) for r in rows]
 
@@ -91,6 +84,7 @@ def orderbook(symbol: str, limit: int = 1):
     rows = _query_external(
         ORDERBOOK_DB,
         "SELECT ts, bidVol, askVol FROM ob_imbalance WHERE symbol=? ORDER BY ts DESC LIMIT ?",
+        (symbol, limit),
     )
     data = [dict(zip(["ts", "bid", "ask"], r)) for r in rows]
     return {"symbol": symbol, "count": len(data), "orderbook": list(reversed(data))}
@@ -102,6 +96,7 @@ def open_interest(symbol: str, limit: int = 10):
     rows = _query_external(
         FUTURES_DB,
         "SELECT ts, oi FROM open_interest WHERE symbol=? ORDER BY ts DESC LIMIT ?",
+        (symbol, limit),
     )
     data = [dict(zip(["ts", "oi"], r)) for r in rows]
     return {"symbol": symbol, "tf": "5m", "count": len(data), "oi": list(reversed(data))}
@@ -113,6 +108,7 @@ def funding_rate(symbol: str, limit: int = 20):
     rows = _query_external(
         FUTURES_DB,
         "SELECT ts, rate FROM funding_rate WHERE symbol=? ORDER BY ts DESC LIMIT ?",
+        (symbol, limit),
     )
     data = [dict(zip(["ts", "rate"], r)) for r in rows]
     return {"symbol": symbol, "count": len(data), "funding": list(reversed(data))}
